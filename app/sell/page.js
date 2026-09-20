@@ -3,6 +3,34 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '../../lib/supabaseClient';
 
+// ค่า config สำหรับ Telegram (ดึงจาก Environment Variables)
+const TELEGRAM_BOT_TOKEN = process.env.NEXT_PUBLIC_TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.NEXT_PUBLIC_TELEGRAM_CHAT_ID;
+const LOW_STOCK_THRESHOLD = 5;
+
+// ฟังก์ชันช่วยยิงข้อความเข้า Telegram
+// ทำงานแบบ async/try-catch แยกจาก flow หลัก ถ้า error จะไม่กระทบระบบขาย
+const sendTelegramMessage = async (text) => {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
+    console.warn('ไม่ได้ตั้งค่า Telegram Bot Token หรือ Chat ID');
+    return;
+  }
+  try {
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        text,
+        parse_mode: 'HTML',
+      }),
+    });
+  } catch (err) {
+    // ไม่ throw ต่อ เพื่อไม่ให้กระทบระบบขายหลัก
+    console.error('ส่ง Telegram notification ไม่สำเร็จ:', err);
+  }
+};
+
 export default function SellPage() {
   // รายการสินค้าทั้งหมด สำหรับ dropdown
   const [products, setProducts] = useState([]);
@@ -71,6 +99,8 @@ export default function SellPage() {
 
     setSubmitting(true);
 
+    const soldAtIso = new Date().toISOString();
+
     // 1) บันทึกรายการขายลงตาราง sales
     const { error: saleError } = await supabase.from('sales').insert([
       {
@@ -78,7 +108,7 @@ export default function SellPage() {
         product_name: selectedProduct.name,
         quantity: qtyNumber,
         total_price: totalPrice,
-        sold_at: new Date().toISOString(),
+        sold_at: soldAtIso,
       },
     ]);
 
@@ -108,6 +138,36 @@ export default function SellPage() {
     setMessage({ type: 'success', text: 'ขายสินค้าสำเร็จ!' });
     resetForm();
     fetchProducts(); // โหลด stock ล่าสุดมาแสดง
+
+    // --- ส่วนที่เพิ่ม: แจ้งเตือนเข้า Telegram หลังตัดสต๊อกสำเร็จ ---
+    // ทำงานแบบ "ยิงแล้วไม่รอ / ไม่บล็อก UI" และไม่ทำให้ระบบขายพังถ้า Telegram มีปัญหา
+    const timeText = new Date(soldAtIso).toLocaleString('th-TH', {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    });
+
+    // งานที่ 1: แจ้งเตือน Order เข้าใหม่
+    const orderMessage =
+      `🛍️ <b>มีรายการขายใหม่!</b>\n` +
+      `- สินค้า: ${selectedProduct.name}\n` +
+      `- จำนวน: ${qtyNumber} ชิ้น\n` +
+      `- ราคารวม: ${totalPrice.toFixed(2)} บาท\n` +
+      `- สต๊อกคงเหลือปัจจุบัน: ${newStock} ชิ้น\n` +
+      `- เวลา: ${timeText}`;
+
+    sendTelegramMessage(orderMessage);
+
+    // งานที่ 2: แจ้งเตือน Stock เหลือน้อย (ถ้าเข้าเงื่อนไข)
+    if (newStock <= LOW_STOCK_THRESHOLD) {
+      const lowStockMessage =
+        `🚨 <b>[เตือนภัย] สต๊อกสินค้าใกล้หมด!</b>\n` +
+        `- สินค้า: ${selectedProduct.name}\n` +
+        `- คงเหลือเพียง: ${newStock} ชิ้น\n` +
+        `⚠️ กรุณาเติมสต๊อกสินค้าด่วน!`;
+
+      sendTelegramMessage(lowStockMessage);
+    }
+    // --- จบส่วนที่เพิ่ม ---
   };
 
   return (
