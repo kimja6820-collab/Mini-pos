@@ -3,48 +3,19 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '../../lib/supabaseClient';
 
-// ค่า config สำหรับ Telegram (ดึงจาก Environment Variables)
-const TELEGRAM_BOT_TOKEN = process.env.NEXT_PUBLIC_TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.NEXT_PUBLIC_TELEGRAM_CHAT_ID;
+// เกณฑ์แจ้งเตือนสต๊อกใกล้หมด
 const LOW_STOCK_THRESHOLD = 5;
 
-// ฟังก์ชันช่วยยิงข้อความเข้า Telegram
-// ทำงานแบบ async/try-catch แยกจาก flow หลัก ถ้า error จะไม่กระทบระบบขาย
-const sendTelegramMessage = async (text) => {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
-    console.warn('ไม่ได้ตั้งค่า Telegram Bot Token หรือ Chat ID');
-    return;
-  }
-  try {
-    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: TELEGRAM_CHAT_ID,
-        text,
-        parse_mode: 'HTML',
-      }),
-    });
-  } catch (err) {
-    // ไม่ throw ต่อ เพื่อไม่ให้กระทบระบบขายหลัก
-    console.error('ส่ง Telegram notification ไม่สำเร็จ:', err);
-  }
-};
-
 export default function SellPage() {
-  // รายการสินค้าทั้งหมด สำหรับ dropdown
   const [products, setProducts] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  // ค่าที่เลือกในฟอร์มขาย
   const [selectedProductId, setSelectedProductId] = useState('');
   const [quantity, setQuantity] = useState('');
 
-  // สถานะระหว่างบันทึกการขาย + ข้อความแจ้งผล
   const [submitting, setSubmitting] = useState(false);
-  const [message, setMessage] = useState(null); // { type: 'success' | 'error', text: string }
+  const [message, setMessage] = useState(null);
 
-  // โหลดรายการสินค้าจาก Supabase
   const fetchProducts = async () => {
     setLoading(true);
     const { data, error } = await supabase
@@ -64,16 +35,74 @@ export default function SellPage() {
     fetchProducts();
   }, []);
 
-  // สินค้าที่กำลังเลือกอยู่ (ใช้หาราคาและ stock)
   const selectedProduct = products.find((p) => p.id === selectedProductId);
-
-  // คำนวณยอดรวมอัตโนมัติ
   const qtyNumber = parseInt(quantity, 10) || 0;
   const totalPrice = selectedProduct ? selectedProduct.price * qtyNumber : 0;
 
   const resetForm = () => {
     setSelectedProductId('');
     setQuantity('');
+  };
+
+  // === เพิ่มใหม่: ฟังก์ชันกลางสำหรับส่งข้อความเข้า Telegram ===
+  // ทำงานแบบ try-catch ในตัวเอง เพื่อไม่ให้ error กระทบ flow การขายหลัก
+  const sendTelegramMessage = async (text) => {
+    const botToken = process.env.NEXT_PUBLIC_TELEGRAM_BOT_TOKEN;
+    const chatId = process.env.NEXT_PUBLIC_TELEGRAM_CHAT_ID;
+
+    if (!botToken || !chatId) {
+      console.warn('ยังไม่ได้ตั้งค่า Telegram Bot Token / Chat ID');
+      return;
+    }
+
+    try {
+      const res = await fetch(
+        `https://api.telegram.org/bot${botToken}/sendMessage`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text,
+            parse_mode: 'HTML',
+          }),
+        }
+      );
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => null);
+        console.error('ส่ง Telegram แจ้งเตือนไม่สำเร็จ:', errData);
+      }
+    } catch (err) {
+      // ไม่ throw ต่อ เพื่อไม่ให้กระทบระบบขายหลัก
+      console.error('เกิดข้อผิดพลาดขณะยิง Telegram API:', err);
+    }
+  };
+
+  // === เพิ่มใหม่: ประกอบข้อความแจ้งเตือน Order ใหม่ ===
+  const buildNewOrderMessage = (productName, qty, total, stockAfter) => {
+    const now = new Date().toLocaleString('th-TH', {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    });
+    return (
+      `🛍️ <b>มีรายการขายใหม่!</b>\n` +
+      `- สินค้า: ${productName}\n` +
+      `- จำนวน: ${qty} ชิ้น\n` +
+      `- ราคารวม: ${total.toFixed(2)} บาท\n` +
+      `- สต๊อกคงเหลือปัจจุบัน: ${stockAfter} ชิ้น\n` +
+      `- เวลา: ${now}`
+    );
+  };
+
+  // === เพิ่มใหม่: ประกอบข้อความแจ้งเตือนสต๊อกใกล้หมด ===
+  const buildLowStockMessage = (productName, stockAfter) => {
+    return (
+      `🚨 <b>[เตือนภัย] สต๊อกสินค้าใกล้หมด!</b>\n` +
+      `- สินค้า: ${productName}\n` +
+      `- คงเหลือเพียง: ${stockAfter} ชิ้น\n` +
+      `⚠️ กรุณาเติมสต๊อกสินค้าด่วน!`
+    );
   };
 
   const handleSell = async (e) => {
@@ -88,7 +117,6 @@ export default function SellPage() {
       setMessage({ type: 'error', text: 'กรุณากรอกจำนวนให้ถูกต้อง' });
       return;
     }
-    // ตรวจสอบ stock เพียงพอหรือไม่
     if (qtyNumber > selectedProduct.stock) {
       setMessage({
         type: 'error',
@@ -99,16 +127,13 @@ export default function SellPage() {
 
     setSubmitting(true);
 
-    const soldAtIso = new Date().toISOString();
-
-    // 1) บันทึกรายการขายลงตาราง sales
     const { error: saleError } = await supabase.from('sales').insert([
       {
         product_id: selectedProduct.id,
         product_name: selectedProduct.name,
         quantity: qtyNumber,
         total_price: totalPrice,
-        sold_at: soldAtIso,
+        sold_at: new Date().toISOString(),
       },
     ]);
 
@@ -118,7 +143,6 @@ export default function SellPage() {
       return;
     }
 
-    // 2) อัปเดต stock ของสินค้าให้ลดลง
     const newStock = selectedProduct.stock - qtyNumber;
     const { error: updateError } = await supabase
       .from('products')
@@ -136,38 +160,31 @@ export default function SellPage() {
     }
 
     setMessage({ type: 'success', text: 'ขายสินค้าสำเร็จ!' });
+
+    // === เพิ่มใหม่: ยิงแจ้งเตือน Telegram หลังตัดสต๊อกสำเร็จ ===
+    // ไม่ await แบบบล็อก UI และห่อด้วย try-catch ผ่าน sendTelegramMessage อยู่แล้ว
+    // ดังนั้นต่อให้ Telegram ล่ม การขายก็เสร็จสมบูรณ์ไปแล้วก่อนหน้านี้
+    (async () => {
+      // งานที่ 1: แจ้งเตือน Order ใหม่ (ส่งทุกครั้งที่ขายสำเร็จ)
+      await sendTelegramMessage(
+        buildNewOrderMessage(
+          selectedProduct.name,
+          qtyNumber,
+          totalPrice,
+          newStock
+        )
+      );
+
+      // งานที่ 2: แจ้งเตือนสต๊อกใกล้หมด (ส่งแยกอีกข้อความ ถ้าเข้าเงื่อนไข)
+      if (newStock <= LOW_STOCK_THRESHOLD) {
+        await sendTelegramMessage(
+          buildLowStockMessage(selectedProduct.name, newStock)
+        );
+      }
+    })();
+
     resetForm();
-    fetchProducts(); // โหลด stock ล่าสุดมาแสดง
-
-    // --- ส่วนที่เพิ่ม: แจ้งเตือนเข้า Telegram หลังตัดสต๊อกสำเร็จ ---
-    // ทำงานแบบ "ยิงแล้วไม่รอ / ไม่บล็อก UI" และไม่ทำให้ระบบขายพังถ้า Telegram มีปัญหา
-    const timeText = new Date(soldAtIso).toLocaleString('th-TH', {
-      dateStyle: 'medium',
-      timeStyle: 'short',
-    });
-
-    // งานที่ 1: แจ้งเตือน Order เข้าใหม่
-    const orderMessage =
-      `🛍️ <b>มีรายการขายใหม่!</b>\n` +
-      `- สินค้า: ${selectedProduct.name}\n` +
-      `- จำนวน: ${qtyNumber} ชิ้น\n` +
-      `- ราคารวม: ${totalPrice.toFixed(2)} บาท\n` +
-      `- สต๊อกคงเหลือปัจจุบัน: ${newStock} ชิ้น\n` +
-      `- เวลา: ${timeText}`;
-
-    sendTelegramMessage(orderMessage);
-
-    // งานที่ 2: แจ้งเตือน Stock เหลือน้อย (ถ้าเข้าเงื่อนไข)
-    if (newStock <= LOW_STOCK_THRESHOLD) {
-      const lowStockMessage =
-        `🚨 <b>[เตือนภัย] สต๊อกสินค้าใกล้หมด!</b>\n` +
-        `- สินค้า: ${selectedProduct.name}\n` +
-        `- คงเหลือเพียง: ${newStock} ชิ้น\n` +
-        `⚠️ กรุณาเติมสต๊อกสินค้าด่วน!`;
-
-      sendTelegramMessage(lowStockMessage);
-    }
-    // --- จบส่วนที่เพิ่ม ---
+    fetchProducts();
   };
 
   return (
@@ -178,7 +195,6 @@ export default function SellPage() {
         <p>กำลังโหลด...</p>
       ) : (
         <form onSubmit={handleSell}>
-          {/* Dropdown เลือกสินค้า */}
           <select
             value={selectedProductId}
             onChange={(e) => setSelectedProductId(e.target.value)}
@@ -192,7 +208,6 @@ export default function SellPage() {
             ))}
           </select>
 
-          {/* จำนวนที่จะขาย */}
           <input
             type="number"
             min="1"
@@ -202,7 +217,6 @@ export default function SellPage() {
             required
           />
 
-          {/* แสดงยอดรวมอัตโนมัติ */}
           <div style={{ fontWeight: 600 }}>
             ยอดรวม: {totalPrice.toFixed(2)} บาท
           </div>
